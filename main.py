@@ -1,40 +1,64 @@
 import asyncio
 import websockets
 import os
+import json
 
-# Render PORT çevre değişkenini otomatik atar
 PORT = int(os.environ.get("PORT", 8765))
 
-ROOMS = {}  # {room_id: [websocket_client1, websocket_client2]}
+# ROOMS = { room_id: { websocket: {"name": str, "role": "HOST"|"CLIENT"} } }
+ROOMS = {}
+
+async def notify_host(room_id):
+    """Sadece Host olan kullanıcıya güncel cihaz listesini gönderir."""
+    if room_id in ROOMS:
+        clients = [info["name"] for info in ROOMS[room_id].values()]
+        msg = json.dumps({"type": "USER_LIST", "users": clients})
+        
+        for ws, info in ROOMS[room_id].items():
+            if info["role"] == "HOST":
+                try:
+                    await ws.send(msg)
+                except Exception:
+                    pass
 
 async def handler(websocket):
+    current_room = None
     try:
         async for message in websocket:
+            # Odaya kayıt istemi: "JOIN:ODA_ID:CLIENT_ID:ROLE"
             if isinstance(message, str) and message.startswith("JOIN:"):
-                room_id = message.split(":")[1]
-                if room_id not in ROOMS:
-                    ROOMS[room_id] = []
-                ROOMS[room_id].append(websocket)
-                websocket.room_id = room_id
-                print(f"[+] İstemci {room_id} odasına katıldı. Odadaki kişi sayısı: {len(ROOMS[room_id])}")
-            else:
-                room_id = getattr(websocket, 'room_id', None)
-                if room_id and room_id in ROOMS:
-                    for client in ROOMS[room_id]:
-                        if client != websocket:
-                            await client.send(message)
+                parts = message.split(":")
+                current_room = parts[1]
+                client_id = parts[2] if len(parts) > 2 else "Bilinmeyen Cihaz"
+                role = parts[3] if len(parts) > 3 else "CLIENT"
+
+                if current_room not in ROOMS:
+                    ROOMS[current_room] = {}
+                
+                ROOMS[current_room][websocket] = {"name": client_id, "role": role}
+                await notify_host(current_room)
+
+            # Şifreli paket iletimi (Binary)
+            elif isinstance(message, bytes) and current_room in ROOMS:
+                for ws in ROOMS[current_room].keys():
+                    if ws != websocket:
+                        try:
+                            await ws.send(message)
+                        except Exception:
+                            pass
+
     except websockets.exceptions.ConnectionClosed:
         pass
     finally:
-        room_id = getattr(websocket, 'room_id', None)
-        if room_id and room_id in ROOMS:
-            if websocket in ROOMS[room_id]:
-                ROOMS[room_id].remove(websocket)
-            if len(ROOMS[room_id]) == 0:
-                del ROOMS[room_id]
+        if current_room and current_room in ROOMS:
+            if websocket in ROOMS[current_room]:
+                del ROOMS[current_room][websocket]
+            if len(ROOMS[current_room]) == 0:
+                del ROOMS[current_room]
+            else:
+                await notify_host(current_room)
 
 async def main():
-    print(f"[+] Render Relay Sunucusu {PORT} portunda başlatılıyor...")
     async with websockets.serve(handler, "0.0.0.0", PORT):
         await asyncio.Future()
 
